@@ -1,0 +1,223 @@
+---
+title: "Data Analysis"
+output: html_document
+date: "2023-10-27"
+---
+
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(microbiome)
+library(mia)
+library(scater)
+library(ggpubr)
+library(vegan)
+library(factoextra)
+
+
+physeq = readRDS("PhySeq_25.10.23.rds")
+TSE <- makeTreeSEFromPhyloseq(physeq)
+```
+
+##  Global composition overview
+
+```{r}
+Phys2 <- aggregate_taxa(physeq, level="Class") %>%
+  microbiome::transform(transform = "compositional")
+
+plot_composition(Phys2, sample.sort = "Sample_type", x.label = "Sample_ID") +
+  scale_fill_brewer("Class", palette = "Paired") +
+  guides(fill = guide_legend(ncol = 1))
+
+```
+
+## Alpha-diversity, Richness and evenness
+
+### ASV level shannon diversity after rarefying
+
+```{r}
+physeq.rarified <- rarefy_even_depth(physeq)
+sampleMeta <- read_csv("metadata.csv")
+
+tab <-microbiome::alpha(physeq.rarified, index = "all") %>%
+  rownames_to_column(var="Sample_ID")
+tab <- dplyr::left_join(tab, sampleMeta)
+
+wilcox.test(diversity_shannon ~ Sample_type, data=tab)
+
+tab %>% ggplot(aes(x=Sample_type, y=diversity_shannon)) +
+  geom_boxplot() + 
+  geom_jitter(width = 0.2) +
+  theme_minimal() +
+  stat_compare_means(label.y = 4)      
+
+```
+
+### ASV Richness after rarefying
+
+```{r}
+physeq.rarified <- rarefy_even_depth(physeq)
+sampleMeta <- read_csv("metadata.csv")
+
+tab <-microbiome::alpha(physeq.rarified, index = "all") %>%
+  rownames_to_column(var="Sample_ID")
+tab <- dplyr::left_join(tab, sampleMeta)
+
+wilcox.test(chao1 ~ Sample_type, data=tab)
+
+tab %>% ggplot(aes(x=Sample_type, y=chao1)) +
+  geom_boxplot() + 
+  geom_jitter(width = 0.2) +
+  theme_minimal() +
+  stat_compare_means(label.y = 30) 
+```
+
+### ASV evenness after rarefying
+
+```{r}
+physeq.rarified <- rarefy_even_depth(physeq)
+sampleMeta <- read_csv("metadata.csv")
+
+tab <-microbiome::alpha(physeq.rarified, index = "all") %>%
+  rownames_to_column(var="Sample_ID")
+tab <- dplyr::left_join(tab, sampleMeta)
+
+wilcox.test(chao1 ~ Sample_type, data=tab)
+
+tab %>% ggplot(aes(x=Sample_type, y=chao1)) +
+  geom_boxplot() + 
+  geom_jitter(width = 0.2) +
+  theme_minimal() +
+  stat_compare_means(label.y = 30) 
+```
+
+## Data structure exploration
+
+### NMDS Bray Curtis
+
+```{r}
+Phys2 <- aggregate_taxa(physeq, level="ASV")
+
+# Convert to compositional data
+pseq.rel <- microbiome::transform(Phys2, "compositional")
+
+mycols <- c("#e0777d", "#477890")
+set.seed(4235421)
+ord <- ordinate(pseq.rel, "NMDS", "bray")
+plot_ordination(pseq.rel, ord, color = "Sample_type") +
+  geom_point(size = 2) +
+  theme_light() +
+  scale_color_manual(values=mycols)
+
+```
+
+```{r}
+ps_rel_otu <- data.frame(phyloseq::otu_table(pseq.rel))
+ps_rel_otu <- t(ps_rel_otu)
+metadata <- meta(pseq.rel)
+
+BC_dist <- vegan::vegdist(ps_rel_otu, method = "bray")
+
+# permanova
+adonis2(BC_dist ~ Sample_type, metadata, permutations = 999) ## significant
+# beta-disp
+anova(betadisper(BC_dist, metadata$Sample_type)) ## significant
+
+```
+
+
+### PCoA Aitchinson and driver taxa analysis
+
+```{r}
+ps_clr <- microbiome::transform(physeq, "clr")
+ps_rel_otu <- data.frame(t(phyloseq::otu_table(ps_clr)))
+meta <- meta(Phys2)
+
+PCA.res<-prcomp(ps_rel_otu)
+
+fviz_eig(PCA.res)
+```
+
+```{r}
+# plotting individuals
+mycols <- c("#e0777d", "#477890")
+fviz_pca_ind(PCA.res, geom="point",
+             habillage=meta$Sample_type) +
+     scale_color_manual(values=mycols)
+
+  
+#ggsave("plot4.pdf", width=14, height=10, units="cm")
+
+```
+
+```{r}
+# plotting top contributing variables
+fviz_pca_var(PCA.res, select.var = list(contrib = 10), col.var = "contrib", 
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE)
+
+#ggsave("plot5.pdf", width=14, height=10, units="cm")
+
+```
+
+```{r}
+ps_rel_otu <- data.frame(phyloseq::otu_table(ps_clr))
+ps_rel_otu <- t(ps_rel_otu)
+metadata <- meta(pseq.rel)
+
+Ait_dist <- vegan::vegdist(ps_rel_otu, method = "euclidean")
+
+# permanova
+adonis2(Ait_dist ~ Sample_type, metadata, permutations = 999) ## significant
+# beta-disp
+anova(betadisper(Ait_dist, metadata$Sample_type)) ## non significant
+
+```
+
+# DA analysis
+
+```{r}
+maaslin2_out <- Maaslin2(input_data = as.data.frame(t(assay(TSE))),
+                         input_metadata = as.data.frame(colData(TSE)),
+                         output = "DAA",
+                         transform = "LOG",
+                         fixed_effects = "Sample_type",
+                         reference = "Sample_type,Early",
+                         normalization = "TSS",
+                         standardize = TRUE,
+                         min_prevalence = 0.2,
+                         min_variance = 0.1)
+```
+
+```{r}
+taxonomy <- read_csv("taxonomy.csv") 
+
+%>%
+  select(TaxID, Genus, Family, Order)
+results <- maaslin2_out$results %>%
+  filter(qval < 0.05) %>%
+  rename("feature"="TaxID") %>%
+  select(TaxID, coef, pval, qval)
+results <- dplyr::left_join(results, taxonomy)
+
+results
+
+```
+
+```{r}
+results %>% 
+  ggplot(aes(x=TaxID, y=coef)) +
+  geom_segment(aes(x=TaxID, xend=TaxID, y=0, yend=coef), color="#4c86a8") +
+  geom_point(color="#4c86a8", size=4, alpha=0.6) +
+  coord_flip() +
+  theme_light() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank()
+  ) +
+  facet_grid(Order~., scales = "free", space = "free")
+
+```
+
+

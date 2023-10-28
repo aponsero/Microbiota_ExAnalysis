@@ -1,0 +1,206 @@
+---
+title: "Data Sanity Check"
+output: html_document
+date: "2023-10-25"
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(microbiome)
+library(mia)
+library(scater)
+library(ranacapa)
+library(taxonomizr)
+```
+
+## 1. Mock community check
+
+### Mock community expected composition
+
+The list of species contained in the mock community was extracted from Kozich JJ (2013) [https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3753973/]. To generate the mock community, the 21 bacterial isolates  were pooled to have an equimolar concentration of 16S rRNA gene copies per genome.
+
+```{r}
+## Retrieving the complete taxonomy from the mock community's species list
+list_taxa <- read_csv("List_SpeciesMock.csv") %>% pull()
+
+getTaxID <- getId(list_taxa, "/Users/alise/Documents/Fin_Postdoc/ressources/NCBI_tax/accessionTaxa.sql")
+MockTaxonomy <- getTaxonomy(getTaxID, "/Users/alise/Documents/Fin_Postdoc/ressources/NCBI_tax/accessionTaxa.sql") 
+MockTaxonomy <- as.data.frame(MockTaxonomy)
+#write_csv(MockTaxonomy, "mock_taxonomy.csv")
+```
+
+### Compare mock to expected mock
+
+```{r}
+# Load expected taxonomy and build expected mock community composition 
+expected_taxonomy <- read_csv("mock_taxonomy.csv")
+expected_composition <- expected_taxonomy %>% 
+  mutate(indiv_ab=0.047) %>% 
+  group_by(genus) %>% mutate(ref_ab=sum(indiv_ab)) %>%
+  select(phylum, genus, ref_ab) %>%
+  unique() %>% ungroup()
+
+# Load observed mock community composition and taxonomy
+ASV_mock <- read_csv("table.csv") %>% select(TaxID, Mock)
+Taxa_mock <- read_csv("taxonomy.csv") %>%
+  mutate(Genus=str_remove(Genus, "g__"))
+mock_data <- dplyr::left_join(ASV_mock, Taxa_mock, by = join_by(TaxID))
+lib_size <- sum(mock_data$Mock)
+observed_composition <- mock_data %>% 
+  mutate(ASV_ab=Mock/lib_size) %>%
+  group_by(Genus) %>%
+  mutate(obs_ab=sum(ASV_ab)) %>%
+  select(Genus, obs_ab) %>%
+  unique() %>%
+  rename("Genus"="genus") %>%
+  ungroup()
+
+# Comparing expected and observed communities
+Comparison_genus <- dplyr::left_join(expected_composition, observed_composition) %>%
+  filter(!is.na(obs_ab)) %>%
+  mutate(Log2FC=log(obs_ab, base=2)-log(ref_ab, base=2)) %>%
+  mutate(color_points=ifelse(Log2FC>0, "#e0777d", "#477890"))
+  
+Comparison_genus %>% 
+  ggplot(aes(x=genus, y=Log2FC)) +
+  geom_segment(aes(x=genus, xend=genus, y=0, yend=Log2FC), color="#4c86a8") +
+  geom_point(color=Comparison_genus$color_points, size=4, alpha=0.6) +
+  coord_flip() +
+  theme_light() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank()
+  ) +
+  ylab("Log2FC")
+
+#ggsave("plot1.pdf", width=12, height=9, units="cm")
+
+```
+
+## 2. Taxonomic annotation quality
+
+```{r}
+# load taxonomy table and replace empty annotation with NA
+My_ttable <- read_csv("taxonomy.csv") %>%
+  mutate(across(everything(), str_replace,"^p__$|^c__$|^o__$|^f__$|^g__$|^s__$",NA_character_))
+```
+
+Contamination detected: some chloroplast contamination in the table.
+
+```{r}
+contamination <- My_ttable %>% filter(Class=="c__Cyanobacteriia")
+contamination
+```
+
+
+Contamination detected: some Mitochondrial contamination in the table.
+
+```{r}
+contamination <- My_ttable %>% filter(Family=="f__Mitochondria")
+contamination
+```
+
+
+```{r}
+# remove Chloroplast & Mitochondrial contamination from table
+My_ttable <- My_ttable %>% 
+  filter(Class!="c__Cyanobacteriia") %>%
+  filter(Family!="f__Mitochondria")
+
+# Count unclassified ASV for each taxonomic rank
+Quality_annotation <- My_ttable %>% 
+  pivot_longer(cols=-TaxID, names_to="level", values_to = "annotation") %>%
+  mutate(annotation=ifelse(is.na(annotation), "Unannotated", "Annotated")) %>%
+  group_by(level, annotation) %>% tally() %>%
+  rename("n"="nb ASV")
+
+# Plot quality
+tax_order=c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+Quality_annotation$level <- factor(Quality_annotation$level, levels=tax_order)
+
+mycols <- c("#e0777d", "#477890")
+Quality_annotation %>% ggplot(aes(x=level, y=`nb ASV`, fill=annotation)) +
+  geom_bar(stat="identity") +
+  theme_light() +
+  scale_fill_manual(values=mycols)
+  
+# ggsave("plot2.pdf", width=14, height=10, units="cm")
+```
+
+
+## 3. Rarefaction curves and sequencing depth
+
+```{r}
+#### Build TreeSummarise object
+
+# ASV count table
+ASV <- read_csv("table.csv") %>% select(-Mock)
+countMat <- ASV %>% tibble::column_to_rownames("TaxID") 
+OTU = otu_table(as.matrix(countMat), taxa_are_rows = TRUE)
+
+# Taxonomy table
+tax_table <- read_csv("taxonomy.csv") %>%
+  select(-Species) %>%
+  mutate(across(everything(), str_replace,"^p__$|^c__$|^o__$|^f__$|^g__$|^s__$",NA_character_)) %>%
+  mutate(across(everything(), str_replace,"^p__|^c__|^o__|^f__|^g__|^s__",""))
+taxMat <- tax_table %>% tibble::column_to_rownames("TaxID")
+TAX = tax_table(as.matrix(taxMat))
+
+# Metadata table
+sampleMeta <- read_csv("metadata.csv") %>% filter(Sample_ID!="Mock") %>%
+  separate(Sample_ID, into=c("indiv_ID", "Day"), sep="D", remove = FALSE)
+sampleMat <- sampleMeta %>%tibble::column_to_rownames("Sample_ID")
+SAMPLE = sample_data(as.data.frame(sampleMat))
+
+physeq = phyloseq(OTU, TAX, SAMPLE)
+physeq <- subset_taxa(physeq, Class!="c__Cyanobacteriia")
+TSE <- makeTreeSEFromPhyloseq(physeq)
+
+#saveRDS(physeq, "PhySeq_25.10.23.rds")
+```
+
+### Sequencing depth
+
+Plotting the library size distribution for the samples.
+
+```{r}
+TSE <- addPerCellQC(TSE)
+
+ggplot(as.data.frame(colData(TSE))) +
+        geom_histogram(aes(x = sum), color = "black", fill = "gray", bins = 30) +
+        labs(x = "Library size", y = "Frequency (n)") + 
+        theme_bw() +
+        theme(panel.grid.major = element_blank(), # Removes the grid
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          panel.background = element_blank(),
+          axis.line = element_line(colour = "black"))
+
+```
+Checking sequencing depth per sample type
+
+```{r}
+plotColData(TSE,"sum","Sample_type", colour_by = "Sample_type") + 
+    theme(axis.text.x = element_text(angle = 45, hjust=1))
+```
+
+Plotting rarefaction curves
+
+```{r}
+set.seed(123)
+rarefaction_curves <- ggrare(physeq, step = 500, plot = FALSE, parallel = TRUE)
+
+mycols <- c("#e0777d", "#477890")
+
+print(rarefaction_curves) + 
+    geom_line(aes(color = Sample_type)) + 
+    facet_wrap(~ Sample_type, nrow = 3, ncol = 3) + 
+    theme_light() +
+    scale_color_manual(values=mycols) +
+    ylab("ASV richness")
+  
+#ggsave("plot3.pdf", width=14, height=10, units="cm")
+
+```
+
